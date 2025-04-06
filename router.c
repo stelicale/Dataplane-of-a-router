@@ -1,6 +1,6 @@
-#include "list.h"
-#include "lib.h"
-#include "protocols.h"
+#include "include/list.h"
+#include "include/lib.h"
+#include "include/protocols.h"
 #include <string.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -38,31 +38,21 @@ static inline int32_t dr_comparator(const void *p, const void *q)
 
 static struct route_table_entry *dr_get_next_route(uint32_t ip_dest)
 {
-	/*
-	 * Binary search used to get the best route using LPM.
-	 * O(logn) time complexity.
-	 */
-	int l = 0;
-	int r = rtable_len - 1;
-	struct route_table_entry *next_hop = NULL;
+    /* Linear search for LPM - garantează găsirea celei mai bune rute */
+    struct route_table_entry *best_route = NULL;
+    uint32_t best_mask = 0;
 
-	while (l <= r) {
-		int m = l + (r - l) / 2;
-
-		if ((ip_dest & rtable[m].mask) == rtable[m].prefix && !next_hop)
-			next_hop = &rtable[m];
-
-		/* If we find a better matching route, we save it.*/
-		if ((ip_dest & rtable[m].mask) == rtable[m].prefix && next_hop)
-			if (ntohl(rtable[m].mask) > ntohl(next_hop->mask))
-				next_hop = &rtable[m];
-
-		if (ntohl(rtable[m].prefix) <= ntohl(ip_dest))
-			l = m + 1;
-		else
-			r = m - 1;
-	}
-	return next_hop;
+    for (uint32_t i = 0; i < rtable_len; i++) {
+        if ((ip_dest & rtable[i].mask) == rtable[i].prefix) {
+            /* Dacă este primul match sau dacă are o mască mai specifică */
+            if (best_route == NULL || ntohl(rtable[i].mask) > best_mask) {
+                best_route = &rtable[i];
+                best_mask = ntohl(rtable[i].mask);
+            }
+        }
+    }
+    
+    return best_route;
 }
 
 static struct arp_entry *dr_get_arp_entry(uint32_t given_ip)
@@ -178,174 +168,190 @@ static void dr_icmp_packet(struct ether_header *eth_hdr,
 }
 
 static void dr_ip_packet(struct ether_header *eth_hdr,
-						 uint32_t interface,
-						 uint32_t len)
+	uint32_t interface,
+	uint32_t len)
 {
-	struct iphdr *ip_hdr = (struct iphdr *)((char *)eth_hdr +
-						   sizeof(*eth_hdr));
-	uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
+struct iphdr *ip_hdr = (struct iphdr *)((char *)eth_hdr +
+	  sizeof(*eth_hdr));
+uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
 
-	/*
-	 * If the packet is not an ICMP "Echo request", meaning that the final
-	 * destinantion is not the router, we do a bunch of checks.
-	 */
-	if (ip_hdr->daddr != router_ip) {
-		uint16_t received_checksum = ip_hdr->check;
+/*
+* If the packet is not an ICMP "Echo request", meaning that the final
+* destinantion is not the router, we do a bunch of checks.
+*/
+if (ip_hdr->daddr != router_ip) {
+/* Checksum integrity check. */
+uint16_t received_checksum = ntohs(ip_hdr->check);  // Convert to host byte order
+ip_hdr->check = 0;
+uint16_t calculated_checksum = checksum((uint16_t *)ip_hdr, ip_hdr->ihl * 4);
 
-		/* Checksum integrity check. */
-		ip_hdr->check = 0;
-		ip_hdr->check = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
+/* Drop the packet if checksum is invalid */
+if (received_checksum != calculated_checksum) {
+return;
+}
 
-		if (received_checksum != ip_hdr->check)
-			return;
+/* TTL check. */
+if (ip_hdr->ttl <= 1) {
+/* ICMP "Time exceeded". */
+dr_icmp_packet(eth_hdr, 11, interface);
+return;
+}
 
-		/* TTL check. */
-		if (ip_hdr->ttl <= 1) {
-			/* ICMP "Time exceeded". */
-			dr_icmp_packet(eth_hdr, 11, interface);
-			return;
-		}
+--ip_hdr->ttl;
+ip_hdr->check = 0;
+ip_hdr->check = htons(checksum((uint16_t *)ip_hdr, ip_hdr->ihl * 4));
 
-		--ip_hdr->ttl;
-		ip_hdr->check = 0;
-		ip_hdr->check = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
+/*
+* Get the next route based of LPM, which was implemented
+* via binary search.
+*/
+struct route_table_entry *next_route = dr_get_next_route(ip_hdr->daddr);
 
-		/*
-		 * Get the next route based of LPM, which was implemented
-		 * via binary search.
-		 */
-		struct route_table_entry *next_route = dr_get_next_route(ip_hdr->daddr);
+if (!next_route) {
+/* ICMP "Destination unreachable". */
+dr_icmp_packet(eth_hdr, 3, interface);
+return;
+}
 
-		if (!next_route) {
-			/* ICMP "Destination unreachable". */
-			dr_icmp_packet(eth_hdr, 3, interface);
-			return;
-		}
+struct arp_entry *next_arp = dr_get_arp_entry(next_route->next_hop);
 
-		struct arp_entry *next_arp = dr_get_arp_entry(next_route->next_hop);
+get_interface_mac(next_route->interface, eth_hdr->ether_shost);
 
-		get_interface_mac(next_route->interface, eth_hdr->ether_shost);
+if (!next_arp) {
+/* Insert packet in queue, send ARP request for it. */
+struct waiting_queue_entry *entry = malloc(sizeof(*entry));
+DIE(!entry, "malloc() failed.\n");
+entry->eth_hdr = malloc(len);
+DIE(!entry->eth_hdr, "malloc() failed.\n");
+memcpy(entry->eth_hdr, eth_hdr, len);
+entry->len = len;
+entry->next_route = next_route;
+dll_add_nth_node(waiting_queue, waiting_queue->size, entry,
+	   sizeof(*entry));
 
-		if (!next_arp) {
+dr_send_arp_request(eth_hdr, next_route, interface);
+return;
+}
 
-			/* Insert packet in queue, send ARP request for it. */
-			struct waiting_queue_entry *entry = malloc(sizeof(*entry));
-			DIE(!entry, "malloc() failed.\n");
-			entry->eth_hdr = malloc(len);
-			DIE(!entry->eth_hdr, "malloc() failed.\n");
-			memcpy(entry->eth_hdr, eth_hdr, len);
-			entry->len = len;
-			entry->next_route = next_route;
-			dll_add_nth_node(waiting_queue, waiting_queue->size, entry,
-							sizeof(*entry));
+memcpy(eth_hdr->ether_dhost, next_arp->mac, sizeof(next_arp->mac));
 
-			dr_send_arp_request(eth_hdr, next_route, interface);
-			return;
-		}
+send_to_link(next_route->interface, (char *)eth_hdr, len);
+} else {
+struct icmphdr *icmp_hdr = (struct icmphdr *)((char *)ip_hdr +
+			  sizeof(*ip_hdr));
 
-		memcpy(eth_hdr->ether_dhost, next_arp->mac, sizeof(next_arp->mac));
+icmp_hdr->type = 0;
+icmp_hdr->code = 0;
+icmp_hdr->checksum = 0;
 
-		send_to_link(next_route->interface, (char *)eth_hdr, len);
-	} else {
-		struct icmphdr *icmp_hdr = (struct icmphdr *)((char *)ip_hdr +
-								   sizeof(*ip_hdr));
+uint32_t icmp_len = ntohs(ip_hdr->tot_len) -
+	   sizeof(*ip_hdr) -
+	   sizeof(*icmp_hdr);
 
-		icmp_hdr->type = 0;
-		icmp_hdr->code = 0;
-		icmp_hdr->checksum = 0;
-		icmp_hdr->checksum = htons(checksum((uint16_t *)icmp_hdr,
-										   sizeof(*icmp_hdr)));
+int8_t *icmp_body = malloc(icmp_len);
+DIE(!icmp_body, "malloc() failed.\n");
+memcpy(icmp_body, (char *)icmp_hdr + sizeof(*icmp_hdr), icmp_len);
 
-		uint32_t icmp_len = ntohs(ip_hdr->tot_len) -
-							sizeof(*ip_hdr) -
-							sizeof(*icmp_hdr);
+ip_hdr->daddr = ip_hdr->saddr;
+ip_hdr->saddr = router_ip;
+ip_hdr->ttl = htons(MAX_TTL);
+ip_hdr->protocol = IPPROTO_ICMP;
+ip_hdr->tot_len = htons((uint16_t)icmp_len +
+	 sizeof(*icmp_hdr) +
+	 sizeof(*ip_hdr));
+ip_hdr->check = 0;
+ip_hdr->check = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
 
-		int8_t *icmp_body = malloc(icmp_len);
-		DIE(!icmp_body, "malloc() failed.\n");
-		memcpy(icmp_body, ip_hdr, icmp_len);
+memcpy(eth_hdr->ether_dhost, eth_hdr->ether_shost,
+sizeof(eth_hdr->ether_shost));
+get_interface_mac(interface, eth_hdr->ether_shost);
 
-		ip_hdr->daddr = ip_hdr->saddr;
-		ip_hdr->saddr = router_ip;
-		ip_hdr->ttl = htons(MAX_TTL);
-		ip_hdr->protocol = IPPROTO_ICMP;
-		ip_hdr->tot_len = htons((uint16_t)icmp_len +
-						  sizeof(*icmp_hdr) +
-						  sizeof(*ip_hdr));
-		ip_hdr->check = 0;
-		ip_hdr->check = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
+memcpy((char *)icmp_hdr + sizeof(*icmp_hdr), icmp_body, icmp_len);
 
-		memcpy(eth_hdr->ether_dhost, eth_hdr->ether_shost,
-			  sizeof(eth_hdr->ether_shost));
-		get_interface_mac(interface, eth_hdr->ether_shost);
+/* Calculate checksum for the entire ICMP message (header + data) */
+icmp_hdr->checksum = 0;
+icmp_hdr->checksum = htons(checksum((uint16_t *)icmp_hdr, 
+			  sizeof(*icmp_hdr) + icmp_len));
 
-		memcpy((char *)icmp_hdr + sizeof(*icmp_hdr), icmp_body, icmp_len);
-
-		send_to_link(interface, (char *)eth_hdr, sizeof(*eth_hdr) +
-												 sizeof(*ip_hdr) +
-												 sizeof(*icmp_hdr) +
-												 icmp_len);
-		free(icmp_body);
-	}
+send_to_link(interface, (char *)eth_hdr, sizeof(*eth_hdr) +
+							sizeof(*ip_hdr) +
+							sizeof(*icmp_hdr) +
+							icmp_len);
+free(icmp_body);
+}
 }
 
 static void dr_arp_packet(struct ether_header *eth_hdr,
-						  uint32_t interface,
-						  uint32_t len)
+                          uint32_t interface,
+                          uint32_t len)
 {
-	struct arp_header *arp_hdr = (struct arp_header *)((char *)eth_hdr +
-								 sizeof(*eth_hdr));
+    struct arp_header *arp_hdr = (struct arp_header *)((char *)eth_hdr +
+                             sizeof(*eth_hdr));
 
-	/* ARP request. */
-	if (ntohs(arp_hdr->op) == 1) {
-		uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
+    /* ARP request. */
+    if (ntohs(arp_hdr->op) == 1) {
+        uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
 
-		if (arp_hdr->tpa != router_ip)
-			return;
+        if (arp_hdr->tpa != router_ip)
+            return;
 
-		arp_hdr->op = htons(2);
+        arp_hdr->op = htons(2);
 
-		/* Swap source and destination. */
-		arp_hdr->tpa = arp_hdr->spa;
-		arp_hdr->spa = router_ip;
+        /* Swap source and destination. */
+        arp_hdr->tpa = arp_hdr->spa;
+        arp_hdr->spa = router_ip;
 
-		memcpy(arp_hdr->tha, arp_hdr->sha, sizeof(arp_hdr->sha));
-		get_interface_mac(interface, arp_hdr->sha);
+        memcpy(arp_hdr->tha, arp_hdr->sha, sizeof(arp_hdr->sha));
+        get_interface_mac(interface, arp_hdr->sha);
 
-		memcpy(eth_hdr->ether_dhost, arp_hdr->tha, sizeof(arp_hdr->tha));
-		get_interface_mac(interface, eth_hdr->ether_shost);
+        memcpy(eth_hdr->ether_dhost, arp_hdr->tha, sizeof(arp_hdr->tha));
+        get_interface_mac(interface, eth_hdr->ether_shost);
 
-		send_to_link(interface, (char *)eth_hdr, len);
-	} else {
-		arp_table[arp_table_len].ip = arp_hdr->spa;
-		memcpy(arp_table[arp_table_len].mac, arp_hdr->sha,
-			  sizeof(arp_hdr->sha));
-		++arp_table_len;
+        send_to_link(interface, (char *)eth_hdr, len);
+    } else {
+        /* ARP reply - check if IP already exists in table */
+        int found = 0;
+        for (uint32_t i = 0; i < arp_table_len; i++) {
+            if (arp_table[i].ip == arp_hdr->spa) {
+                /* Update existing entry */
+                memcpy(arp_table[i].mac, arp_hdr->sha, sizeof(arp_hdr->sha));
+                found = 1;
+                break;
+            }
+        }
+        
+        /* Add new entry only if IP wasn't found */
+        if (!found) {
+            arp_table[arp_table_len].ip = arp_hdr->spa;
+            memcpy(arp_table[arp_table_len].mac, arp_hdr->sha, sizeof(arp_hdr->sha));
+            ++arp_table_len;
+        }
 
-		/* Find the packet that needs to get sent from the waiting queue. */
-		dll_node_t *node = waiting_queue->head;
-		uint32_t i = 0;
+        /* Find the packet that needs to get sent from the waiting queue. */
+        dll_node_t *node = waiting_queue->head;
+        uint32_t i = 0;
 
-		while (node) {
-			struct waiting_queue_entry *entry = (struct waiting_queue_entry *)node->data;
-			struct ether_header *entry_eth_hdr = (struct ether_header *)entry->eth_hdr;
+        while (node) {
+            struct waiting_queue_entry *entry = (struct waiting_queue_entry *)node->data;
+            struct ether_header *entry_eth_hdr = (struct ether_header *)entry->eth_hdr;
 
-			if (entry->next_route->next_hop == arp_hdr->spa) {
-				memcpy(entry_eth_hdr->ether_dhost, arp_hdr->sha,
-					  sizeof(arp_hdr->sha));
+            if (entry->next_route->next_hop == arp_hdr->spa) {
+                memcpy(entry_eth_hdr->ether_dhost, arp_hdr->sha,
+                      sizeof(arp_hdr->sha));
 
-				send_to_link(entry->next_route->interface,
-							(char *)entry_eth_hdr, entry->len);
+                send_to_link(entry->next_route->interface,
+                            (char *)entry_eth_hdr, entry->len);
 
-				dll_node_t *node = dll_remove_nth_node(waiting_queue, i);
-				free(((struct waiting_queue_entry *)(node->data))->eth_hdr);
-				free(node);
+                dll_node_t *node = dll_remove_nth_node(waiting_queue, i);
+                free(((struct waiting_queue_entry *)(node->data))->eth_hdr);
+                free(node);
 
-				--i;
-			}
-			++i;
-			node = node->next;
-		}
-	}
+                --i;
+            }
+            ++i;
+            node = node->next;
+        }
+    }
 }
 
 int main(int argc, char *argv[])
