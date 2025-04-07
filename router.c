@@ -64,59 +64,59 @@ static struct arp_entry *dr_get_arp_entry(uint32_t given_ip)
 	return NULL;
 }
 
-static void dr_send_arp_request(struct ether_header *eth_hdr,
+static void dr_send_arp_request(struct ether_hdr *eth_hdr,
 								struct route_table_entry *next_route,
 								uint32_t interface)
 {
-	struct arp_header *arp_hdr = (struct arp_header *)((char *)eth_hdr +
+	struct arp_hdr *arp_hdr = (struct arp_hdr *)((char *)eth_hdr +
 								 sizeof(*eth_hdr));
 
-	arp_hdr->htype = htons(1);
+	arp_hdr->hw_type = htons(1);
 	/* Set the ARP protocol format as the one for IPv4. */
-	arp_hdr->ptype = htons(IP_ETHERTYPE);
-	arp_hdr->hlen = 6;
-	arp_hdr->plen = 4;
+	arp_hdr->proto_type = htons(IP_ETHERTYPE);
+	arp_hdr->hw_len = 6;
+	arp_hdr->proto_len = 4;
 	/* Set the operation type with the one for ARP request. */
-	arp_hdr->op = htons(1);
+	arp_hdr->opcode = htons(1);
 	/*
 	 * Set the source mac address as the one of the router interface
 	 * the packet will be sent from.
 	 */
-	get_interface_mac(next_route->interface, arp_hdr->sha);
+	get_interface_mac(next_route->interface, arp_hdr->shwa);
 
 	/*
 	 * Set the source ip address as the one of the router interface
 	 * the packet was received from.
 	 */
 	uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
-	arp_hdr->spa = router_ip;
+	arp_hdr->sprotoa = router_ip;
 
 	/* Fill with 0 the target MAC address as a place holder. */
-	memset(arp_hdr->tha, 0, sizeof(arp_hdr->tha));
-	arp_hdr->tpa = next_route->next_hop;
+	memset(arp_hdr->thwa, 0, sizeof(arp_hdr->thwa));
+	arp_hdr->tprotoa = next_route->next_hop;
 
 	/* This packet is sent to everyone, so fill the destination MAC with Fs. */
-	memset(eth_hdr->ether_dhost, 0xff, sizeof(eth_hdr->ether_dhost));
-	eth_hdr->ether_type = htons(ARP_ETHERTYPE);
+	memset(eth_hdr->ethr_dhost, 0xff, sizeof(eth_hdr->ethr_dhost));
+	eth_hdr->ethr_type = htons(ARP_ETHERTYPE);
 
 	send_to_link(next_route->interface, (char *)eth_hdr, sizeof(*eth_hdr) +
 				sizeof(*arp_hdr));
 }
 
-static void dr_icmp_packet(struct ether_header *eth_hdr,
+static void dr_icmp_packet(struct ether_hdr *eth_hdr,
 						   uint8_t type,
 						   uint32_t interface)
 {
-	struct iphdr *ip_hdr = (struct iphdr *)((char *)eth_hdr +
+	struct ip_hdr *ip_hdr = (struct ip_hdr *)((char *)eth_hdr +
 						   sizeof(*eth_hdr));
-	struct icmphdr *icmp_hdr = (struct icmphdr *)((char *)ip_hdr +
+	struct icmp_hdr *icmp_hdr = (struct icmp_hdr *)((char *)ip_hdr +
 							   sizeof(*ip_hdr));
 
 	/* Prepare the ICMP header based of the custom type (either 11 or 3). */
-	icmp_hdr->type = type;
-	icmp_hdr->code = 0;
-	icmp_hdr->checksum = 0;
-	icmp_hdr->checksum = htons(checksum((uint16_t *)icmp_hdr,
+	icmp_hdr->mtype = type;
+	icmp_hdr->mcode = 0;
+	icmp_hdr->check = 0;
+	icmp_hdr->check = htons(checksum((uint16_t *)icmp_hdr,
 							  sizeof(*icmp_hdr)));
 	/*
 	 * Prepare the ICMP body with the IPv4 header and the first 8 bytes of
@@ -136,13 +136,13 @@ static void dr_icmp_packet(struct ether_header *eth_hdr,
 	 *		2. The source is now the IP address of the interface the packet
 	 *		   was received from.
 	 */
-	ip_hdr->daddr = ip_hdr->saddr;
-	ip_hdr->saddr = router_ip;
+	ip_hdr->dest_addr = ip_hdr->source_addr;
+	ip_hdr->source_addr = router_ip;
 	ip_hdr->ttl = htons(MAX_TTL);
-	ip_hdr->protocol = IPPROTO_ICMP;
+	ip_hdr->proto = IPPROTO_ICMP;
 	ip_hdr->tot_len = htons(sizeof(*icmp_hdr) + sizeof(*ip_hdr) + icmp_len);
-	ip_hdr->check = 0;
-	ip_hdr->check = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
+	ip_hdr->checksum = 0;
+	ip_hdr->checksum = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
 
 	/*
 	 * Swap the source and destinantion MAC addresses as well:
@@ -151,12 +151,12 @@ static void dr_icmp_packet(struct ether_header *eth_hdr,
 	 *		2. The source is now the MAC address of the interface the packet
 	 *		   was received from.
 	 */
-	memcpy(eth_hdr->ether_dhost, eth_hdr->ether_shost,
-		  sizeof(eth_hdr->ether_shost));
-	get_interface_mac(interface, eth_hdr->ether_shost);
+	memcpy(eth_hdr->ethr_dhost, eth_hdr->ethr_shost,
+		  sizeof(eth_hdr->ethr_shost));
+	get_interface_mac(interface, eth_hdr->ethr_shost);
 
 	/*
-	 * Copy the ICMP body into the packet that gets sent.
+	 * Copy the ICMP body into the packet thwat gets sent.
 	 */
 	memcpy((char *)icmp_hdr + sizeof(*icmp_hdr), icmp_body, icmp_len);
 
@@ -167,22 +167,22 @@ static void dr_icmp_packet(struct ether_header *eth_hdr,
 	free(icmp_body);
 }
 
-static void dr_ip_packet(struct ether_header *eth_hdr,
+static void dr_ip_packet(struct ether_hdr *eth_hdr,
 	uint32_t interface,
 	uint32_t len)
 {
-struct iphdr *ip_hdr = (struct iphdr *)((char *)eth_hdr +
+struct ip_hdr *ip_hdr = (struct ip_hdr *)((char *)eth_hdr +
 	  sizeof(*eth_hdr));
 uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
 
 /*
-* If the packet is not an ICMP "Echo request", meaning that the final
+* If the packet is not an ICMP "Echo request", meaning thwat the final
 * destinantion is not the router, we do a bunch of checks.
 */
-if (ip_hdr->daddr != router_ip) {
+if (ip_hdr->dest_addr != router_ip) {
 /* Checksum integrity check. */
-uint16_t received_checksum = ntohs(ip_hdr->check);  // Convert to host byte order
-ip_hdr->check = 0;
+uint16_t received_checksum = ntohs(ip_hdr->checksum);  // Convert to host byte order
+ip_hdr->checksum = 0;
 uint16_t calculated_checksum = checksum((uint16_t *)ip_hdr, ip_hdr->ihl * 4);
 
 /* Drop the packet if checksum is invalid */
@@ -198,14 +198,14 @@ return;
 }
 
 --ip_hdr->ttl;
-ip_hdr->check = 0;
-ip_hdr->check = htons(checksum((uint16_t *)ip_hdr, ip_hdr->ihl * 4));
+ip_hdr->checksum = 0;
+ip_hdr->checksum = htons(checksum((uint16_t *)ip_hdr, ip_hdr->ihl * 4));
 
 /*
 * Get the next route based of LPM, which was implemented
 * via binary search.
 */
-struct route_table_entry *next_route = dr_get_next_route(ip_hdr->daddr);
+struct route_table_entry *next_route = dr_get_next_route(ip_hdr->dest_addr);
 
 if (!next_route) {
 /* ICMP "Destination unreachable". */
@@ -215,7 +215,7 @@ return;
 
 struct arp_entry *next_arp = dr_get_arp_entry(next_route->next_hop);
 
-get_interface_mac(next_route->interface, eth_hdr->ether_shost);
+get_interface_mac(next_route->interface, eth_hdr->ethr_shost);
 
 if (!next_arp) {
 /* Insert packet in queue, send ARP request for it. */
@@ -233,16 +233,16 @@ dr_send_arp_request(eth_hdr, next_route, interface);
 return;
 }
 
-memcpy(eth_hdr->ether_dhost, next_arp->mac, sizeof(next_arp->mac));
+memcpy(eth_hdr->ethr_dhost, next_arp->mac, sizeof(next_arp->mac));
 
 send_to_link(next_route->interface, (char *)eth_hdr, len);
 } else {
-struct icmphdr *icmp_hdr = (struct icmphdr *)((char *)ip_hdr +
+struct icmp_hdr *icmp_hdr = (struct icmp_hdr *)((char *)ip_hdr +
 			  sizeof(*ip_hdr));
 
-icmp_hdr->type = 0;
-icmp_hdr->code = 0;
-icmp_hdr->checksum = 0;
+icmp_hdr->mtype = 0;
+icmp_hdr->mcode = 0;
+icmp_hdr->check = 0;
 
 uint32_t icmp_len = ntohs(ip_hdr->tot_len) -
 	   sizeof(*ip_hdr) -
@@ -252,25 +252,25 @@ int8_t *icmp_body = malloc(icmp_len);
 DIE(!icmp_body, "malloc() failed.\n");
 memcpy(icmp_body, (char *)icmp_hdr + sizeof(*icmp_hdr), icmp_len);
 
-ip_hdr->daddr = ip_hdr->saddr;
-ip_hdr->saddr = router_ip;
+ip_hdr->dest_addr = ip_hdr->source_addr;
+ip_hdr->source_addr = router_ip;
 ip_hdr->ttl = htons(MAX_TTL);
-ip_hdr->protocol = IPPROTO_ICMP;
+ip_hdr->proto = IPPROTO_ICMP;
 ip_hdr->tot_len = htons((uint16_t)icmp_len +
 	 sizeof(*icmp_hdr) +
 	 sizeof(*ip_hdr));
-ip_hdr->check = 0;
-ip_hdr->check = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
+ip_hdr->checksum = 0;
+ip_hdr->checksum = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
 
-memcpy(eth_hdr->ether_dhost, eth_hdr->ether_shost,
-sizeof(eth_hdr->ether_shost));
-get_interface_mac(interface, eth_hdr->ether_shost);
+memcpy(eth_hdr->ethr_dhost, eth_hdr->ethr_shost,
+sizeof(eth_hdr->ethr_shost));
+get_interface_mac(interface, eth_hdr->ethr_shost);
 
 memcpy((char *)icmp_hdr + sizeof(*icmp_hdr), icmp_body, icmp_len);
 
 /* Calculate checksum for the entire ICMP message (header + data) */
-icmp_hdr->checksum = 0;
-icmp_hdr->checksum = htons(checksum((uint16_t *)icmp_hdr, 
+icmp_hdr->check = 0;
+icmp_hdr->check = htons(checksum((uint16_t *)icmp_hdr, 
 			  sizeof(*icmp_hdr) + icmp_len));
 
 send_to_link(interface, (char *)eth_hdr, sizeof(*eth_hdr) +
@@ -281,40 +281,40 @@ free(icmp_body);
 }
 }
 
-static void dr_arp_packet(struct ether_header *eth_hdr,
+static void dr_arp_packet(struct ether_hdr *eth_hdr,
                           uint32_t interface,
                           uint32_t len)
 {
-    struct arp_header *arp_hdr = (struct arp_header *)((char *)eth_hdr +
+    struct arp_hdr *arp_hdr = (struct arp_hdr *)((char *)eth_hdr +
                              sizeof(*eth_hdr));
 
     /* ARP request. */
-    if (ntohs(arp_hdr->op) == 1) {
+    if (ntohs(arp_hdr->opcode) == 1) {
         uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
 
-        if (arp_hdr->tpa != router_ip)
+        if (arp_hdr->tprotoa != router_ip)
             return;
 
-        arp_hdr->op = htons(2);
+        arp_hdr->opcode = htons(2);
 
         /* Swap source and destination. */
-        arp_hdr->tpa = arp_hdr->spa;
-        arp_hdr->spa = router_ip;
+        arp_hdr->tprotoa = arp_hdr->sprotoa;
+        arp_hdr->sprotoa = router_ip;
 
-        memcpy(arp_hdr->tha, arp_hdr->sha, sizeof(arp_hdr->sha));
-        get_interface_mac(interface, arp_hdr->sha);
+        memcpy(arp_hdr->thwa, arp_hdr->shwa, sizeof(arp_hdr->shwa));
+        get_interface_mac(interface, arp_hdr->shwa);
 
-        memcpy(eth_hdr->ether_dhost, arp_hdr->tha, sizeof(arp_hdr->tha));
-        get_interface_mac(interface, eth_hdr->ether_shost);
+        memcpy(eth_hdr->ethr_dhost, arp_hdr->thwa, sizeof(arp_hdr->thwa));
+        get_interface_mac(interface, eth_hdr->ethr_shost);
 
         send_to_link(interface, (char *)eth_hdr, len);
     } else {
         /* ARP reply - check if IP already exists in table */
         int found = 0;
         for (uint32_t i = 0; i < arp_table_len; i++) {
-            if (arp_table[i].ip == arp_hdr->spa) {
+            if (arp_table[i].ip == arp_hdr->sprotoa) {
                 /* Update existing entry */
-                memcpy(arp_table[i].mac, arp_hdr->sha, sizeof(arp_hdr->sha));
+                memcpy(arp_table[i].mac, arp_hdr->shwa, sizeof(arp_hdr->shwa));
                 found = 1;
                 break;
             }
@@ -322,22 +322,22 @@ static void dr_arp_packet(struct ether_header *eth_hdr,
         
         /* Add new entry only if IP wasn't found */
         if (!found) {
-            arp_table[arp_table_len].ip = arp_hdr->spa;
-            memcpy(arp_table[arp_table_len].mac, arp_hdr->sha, sizeof(arp_hdr->sha));
+            arp_table[arp_table_len].ip = arp_hdr->sprotoa;
+            memcpy(arp_table[arp_table_len].mac, arp_hdr->shwa, sizeof(arp_hdr->shwa));
             ++arp_table_len;
         }
 
-        /* Find the packet that needs to get sent from the waiting queue. */
+        /* Find the packet thwat needs to get sent from the waiting queue. */
         dll_node_t *node = waiting_queue->head;
         uint32_t i = 0;
 
         while (node) {
             struct waiting_queue_entry *entry = (struct waiting_queue_entry *)node->data;
-            struct ether_header *entry_eth_hdr = (struct ether_header *)entry->eth_hdr;
+            struct ether_hdr *entry_eth_hdr = (struct ether_hdr *)entry->eth_hdr;
 
-            if (entry->next_route->next_hop == arp_hdr->spa) {
-                memcpy(entry_eth_hdr->ether_dhost, arp_hdr->sha,
-                      sizeof(arp_hdr->sha));
+            if (entry->next_route->next_hop == arp_hdr->sprotoa) {
+                memcpy(entry_eth_hdr->ethr_dhost, arp_hdr->shwa,
+                      sizeof(arp_hdr->shwa));
 
                 send_to_link(entry->next_route->interface,
                             (char *)entry_eth_hdr, entry->len);
@@ -379,9 +379,9 @@ int main(int argc, char *argv[])
 		interface = recv_from_any_link(buf, &len);
 		DIE(interface < 0, "recv_from_any_links");
 
-		struct ether_header *eth_hdr = (struct ether_header *)buf;
+		struct ether_hdr *eth_hdr = (struct ether_hdr *)buf;
 
-		switch (ntohs(eth_hdr->ether_type)) {
+		switch (ntohs(eth_hdr->ethr_type)) {
 		case IP_ETHERTYPE:
 			dr_ip_packet(eth_hdr, interface, len);
 			break;

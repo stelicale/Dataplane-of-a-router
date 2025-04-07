@@ -1,0 +1,27 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/usr/include/**",
+                "${workspaceFolder}/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "configurationProvider": "ms-vscode.makefile-tools",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}",
+                    "/usr/include/netinet",
+                    "/usr/include/arpa"
+                ],
+                "limitSymbolsToIncludedHeaders": false
+            }
+        }
+    ],
+    "version": 4
+}

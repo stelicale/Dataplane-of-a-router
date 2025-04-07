@@ -1,0 +1,21 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build router",
+            "type": "shell",
+            "command": "gcc",
+            "args": [
+                "-o",
+                "router",
+                "router.c",
+                "-I${workspaceFolder}/include",
+                "-Wall"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}

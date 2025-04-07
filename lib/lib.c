@@ -17,7 +17,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-
 int interfaces[ROUTER_NUM_INTERFACES];
 
 int get_sock(const char *if_name)
