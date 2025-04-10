@@ -1,111 +1,151 @@
 #ifndef _SKEL_H_
 #define _SKEL_H_
 
-#include <unistd.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <unistd.h>     // Provides access to POSIX operating system API
+#include <stdint.h>     // Provides fixed-width integer types (uint8_t, uint32_t, etc.)
+#include <stdio.h>      // Provides standard I/O functions
+#include <stdlib.h>     // Provides memory allocation, process control, conversions, etc.
 
-#define MAX_PACKET_LEN 1400
-#define ROUTER_NUM_INTERFACES 3
-#define MAX_RTABLE_LEN 100000
-#define MAX_ARP_TABLE_LEN 20
-#define IP_ETHERTYPE 0x0800
-#define ARP_ETHERTYPE 0x0806
-#define MAX_TTL 64
+/**
+ * Constants used throughout the router implementation
+ */
+#define MAX_PACKET_LEN 1400      // Maximum packet length the router can process
+#define ROUTER_NUM_INTERFACES 3  // Number of network interfaces on the router
+#define MAX_RTABLE_LEN 100000    // Maximum number of entries in the routing table
+#define MAX_ARP_TABLE_LEN 20     // Maximum number of entries in the ARP table
+#define IP_ETHERTYPE 0x0800      // EtherType value for IPv4 packets
+#define ARP_ETHERTYPE 0x0806     // EtherType value for ARP packets
+#define MAX_TTL 64               // Maximum Time-To-Live for IP packets
 
+/**
+ * Error handling macro that terminates the program if a condition is true
+ * 
+ * @param condition - The condition to check
+ * @param message - The error message to display
+ * @param ... - Additional format parameters for the message
+ */
 #define DIE(condition, message, ...) \
-	do { \
-		if ((condition)) { \
-			fprintf(stderr, "[(%s:%d)]: " # message "\n", __FILE__, __LINE__, ##__VA_ARGS__); \
-			perror(""); \
-			exit(1); \
-		} \
-	} while (0)
+    do { \
+        if ((condition)) { \
+            fprintf(stderr, "[(%s:%d)]: " # message "\n", __FILE__, __LINE__, ##__VA_ARGS__); \
+            perror(""); \
+            exit(1); \
+        } \
+    } while (0)
 
-/* Route table entry */
+// Forward declaration for trie node structure
+struct trie_node;
+typedef struct trie_node trie_node_t;
+
+/**
+ * Structure representing an entry in the routing table
+ * Used for making forwarding decisions based on destination IP
+ */
 struct route_table_entry {
-	uint32_t prefix;
-	uint32_t next_hop;
-	uint32_t mask;
-	int interface;
-} __attribute__((packed));
+    uint32_t prefix;    // Network prefix (subnet address)
+    uint32_t next_hop;  // Next hop IP address
+    uint32_t mask;      // Subnet mask
+    int interface;      // Output interface index
+} __attribute__((packed));  // Ensures no padding between struct fields
 
-/* ARP table entry when skipping the ARP exercise */
+/**
+ * Structure representing an entry in the ARP table
+ * Maps IP addresses to MAC addresses
+ */
 struct arp_entry {
-    uint32_t ip;
-    uint8_t mac[6];
+    uint32_t ip;       // IP address
+    uint8_t mac[6];    // MAC address (6 bytes)
 };
 
+/**
+ * Structure for queuing packets waiting for ARP resolution
+ * Used when router needs to forward a packet but doesn't have the MAC
+ */
 struct waiting_queue_entry {
-	char *eth_hdr;
-	int len;
-	struct route_table_entry *next_route;
+    char *eth_hdr;                      // Pointer to the Ethernet frame
+    int len;                            // Length of the frame
+    struct route_table_entry *next_route;  // Route information for forwarding
 };
 
+/**
+ * Sends a packet to a specific network interface
+ * 
+ * @param interface - The interface index to send the packet to
+ * @param frame_data - Pointer to the frame data to be sent
+ * @param length - The length of the frame in bytes
+ * @return 0 on success, -1 on failure
+ */
 int send_to_link(int interface, char *frame_data, size_t length);
 
-/*
- * @brief Receives a packet. Blocking function, blocks if there is no packet to
- * be received.
+/**
+ * Receives a packet from any available network interface
+ * This is a blocking function - waits until a packet is received
  *
- * @param frame_data - region of memory in which the data will be copied; should
- *        have at least MAX_PACKET_LEN bytes allocated 
- * @param length - will be set to the total number of bytes received.
- * Returns: the interface it has been received from.
+ * @param frame_data - Buffer where the received packet will be stored
+ * @param length - Pointer where the length of the received packet will be stored
+ * @return The interface index from which the packet was received
  */
 int recv_from_any_link(char *frame_data, size_t *length);
 
+/**
+ * Gets the IP address of a specific interface
+ *
+ * @param interface - The interface index
+ * @return A string representation of the interface's IP address
+ */
 char *get_interface_ip(int interface);
 
 /**
- * @brief Get the interface mac object. The function writes
- * the MAC at the pointer mac. uint8_t *mac should be allocated.
+ * Gets the MAC address of a specific interface
  *
- * @param interface
- * @param mac
+ * @param interface - The interface index
+ * @param mac - Buffer where the MAC address will be stored (must be pre-allocated)
  */
 void get_interface_mac(int interface, uint8_t *mac);
 
 /**
- * @brief Homework infrastructure function.
+ * Calculates IPv4/ICMP checksum per RFC 791/792
+ * For proper calculation, the checksum field must be set to 0 beforehand
  *
- * @param argc
- * @param argv
- */
-
-/**
- * @brief IPv4 checksum per  RFC 791. To compute the checksum
- * of an IP header we must set the checksum to 0 beforehand.
- *
- * also works as ICMP checksum per RFC 792. To compute the checksum
- * of an ICMP header we must set the checksum to 0 beforehand.
-
- * @param data memory area to checksum
- * @param size in bytes
+ * @param data - Pointer to data to calculate checksum for
+ * @param len - Length of data in bytes
+ * @return The calculated checksum value
  */
 uint16_t checksum(uint16_t *data, size_t len);
 
 /**
- * hwaddr_aton - Convert ASCII string to MAC address (colon-delimited format)
- * @txt: MAC address as a string (e.g., "00:11:22:33:44:55")
- * @addr: Buffer for the MAC address (ETH_ALEN = 6 bytes)
- * Returns: 0 on success, -1 on failure (e.g., string not a MAC address)
+ * Converts a MAC address from string format to binary
+ * 
+ * @param txt - MAC address string (format "aa:bb:cc:dd:ee:ff")
+ * @param addr - Buffer where the binary MAC will be stored
+ * @return 0 on success, -1 on failure
  */
 int hwaddr_aton(const char *txt, uint8_t *addr);
 
-/* Populates a route table from file, rtable should be allocated
- * e.g. rtable = malloc(sizeof(struct route_table_entry) * 80000);
- * This function returns the size of the route table.
+/**
+ * Reads routing table entries from a file and builds a trie directly
+ *
+ * @param path - Path to the routing table file
+ * @param trie_root - Pointer to the root of the trie to be populated
+ * @return Number of entries read and inserted from the file
  */
-int read_rtable(const char *path, struct route_table_entry *rtable);
+int read_rtable_to_trie(const char *path, trie_node_t *trie_root);
 
-/* Parses a static mac table from path and populates arp_table.
- * arp_table should be allocated and have enough space. This
- * function returns the size of the arp table.
- * */
+/**
+ * Parses ARP table entries from a file
+ *
+ * @param path - Path to the ARP table file
+ * @param arp_table - Pre-allocated buffer for storing ARP table entries
+ * @return Number of entries read from the file
+ */
 int parse_arp_table(char *path, struct arp_entry *arp_table);
 
+/**
+ * Initializes router interfaces
+ *
+ * @param argv - Command line arguments containing interface names
+ * @param argc - Number of command line arguments
+ */
 void init(char *argv[], int argc);
 
 #endif /* _SKEL_H_ */
