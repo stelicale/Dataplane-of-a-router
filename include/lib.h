@@ -5,6 +5,7 @@
 #include <stdint.h>     // Provides fixed-width integer types (uint8_t, uint32_t, etc.)
 #include <stdio.h>      // Provides standard I/O functions
 #include <stdlib.h>     // Provides memory allocation, process control, conversions, etc.
+#include <queue.h>
 
 /**
  * Constants used throughout the router implementation
@@ -52,7 +53,7 @@ struct route_table_entry {
  * Structure representing an entry in the ARP table
  * Maps IP addresses to MAC addresses
  */
-struct arp_entry {
+struct arp_table_entry {
     uint32_t ip;       // IP address
     uint8_t mac[6];    // MAC address (6 bytes)
 };
@@ -65,6 +66,13 @@ struct waiting_queue_entry {
     char *eth_hdr;                      // Pointer to the Ethernet frame
     int len;                            // Length of the frame
     struct route_table_entry *next_route;  // Route information for forwarding
+};
+
+struct router_t{
+    trie_node_t *routing_table;  // Root of the routing trie
+    struct arp_table_entry *arp_table;  // Pointer to the ARP table
+    int arp_table_len;       // Number of entries in the ARP table
+    queue waiting_queue;  // Queue for packets waiting for ARP resolution
 };
 
 /**
@@ -101,7 +109,7 @@ char *get_interface_ip(int interface);
  * @param interface - The interface index
  * @param mac - Buffer where the MAC address will be stored (must be pre-allocated)
  */
-void get_interface_mac(int interface, uint8_t *mac);
+void get_interface_mac(size_t interface, uint8_t *mac);
 
 /**
  * Calculates IPv4/ICMP checksum per RFC 791/792
@@ -111,7 +119,7 @@ void get_interface_mac(int interface, uint8_t *mac);
  * @param len - Length of data in bytes
  * @return The calculated checksum value
  */
-uint16_t checksum(uint16_t *data, size_t len);
+uint16_t checksum(uint16_t *data, size_t length);
 
 /**
  * Converts a MAC address from string format to binary
@@ -138,7 +146,7 @@ int read_rtable_to_trie(const char *path, trie_node_t *trie_root);
  * @param arp_table - Pre-allocated buffer for storing ARP table entries
  * @return Number of entries read from the file
  */
-int parse_arp_table(char *path, struct arp_entry *arp_table);
+int parse_arp_table(char *path, struct arp_table_entry *arp_table);
 
 /**
  * Initializes router interfaces

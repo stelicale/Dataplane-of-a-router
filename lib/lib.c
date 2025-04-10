@@ -145,7 +145,7 @@ char *get_interface_ip(int interface)
     return inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr);
 }
 
-void get_interface_mac(int interface, uint8_t *mac)
+void get_interface_mac(size_t interface, uint8_t *mac)
 {
     struct ifreq ifr;  // Interface request structure
     int ret;
@@ -154,7 +154,7 @@ void get_interface_mac(int interface, uint8_t *mac)
     if (interface == 0)
         sprintf(ifr.ifr_name, "rr-0-1");
     else {
-        sprintf(ifr.ifr_name, "r-%u", interface - 1);
+        sprintf(ifr.ifr_name, "r-%lu", interface - 1);
     }
     
     // Use ioctl to get the hardware/MAC address of the interface
@@ -324,7 +324,7 @@ int read_rtable_to_trie(const char *path, trie_node_t *trie_root)
     return j;  // Return the number of routing table entries inserted
 }
 
-int parse_arp_table(char *path, struct arp_entry *arp_table)
+int parse_arp_table(char *path, struct arp_table_entry *arp_table)
 {
     FILE *f;
     fprintf(stderr, "Parsing ARP table\n");

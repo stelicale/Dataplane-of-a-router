@@ -1,0 +1,14 @@
+{
+    "files.associations": {
+        "in.h": "c",
+        "inet.h": "c",
+        "protocols.h": "c",
+        "string.h": "c",
+        "lib.h": "c",
+        "list.h": "c",
+        "trie.h": "c",
+        "if.h": "c",
+        "*.ipp": "c",
+        "source_location": "c"
+    }
+}
