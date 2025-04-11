@@ -46,58 +46,6 @@ struct arp_table_entry *dr_get_arp_entry(struct router_t *router, uint32_t given
 }
 
 /**
- * Creates and sends an ARP request packet
- * Used to discover the MAC address for a known IP address
- */
-void dr_send_arp_request(struct ether_hdr *eth_hdr,
-                         struct route_table_entry *next_route,
-                         uint32_t interface)
-{
-    // Position the ARP header right after the Ethernet header
-    struct arp_hdr *arp_hdr = (struct arp_hdr *)((char *)eth_hdr +
-                                                 sizeof(*eth_hdr));
-
-    // Configure the ARP header fields
-    arp_hdr->hw_type = htons(1); // Set hardware type to Ethernet (1), convert to network byte order
-
-    // Set protocol type to IPv4 (0x0800), convert to network byte order
-    arp_hdr->proto_type = htons(IP_ETHERTYPE);
-
-    arp_hdr->hw_len = 6;    // MAC address is 6 bytes long
-    arp_hdr->proto_len = 4; // IPv4 address is 4 bytes long
-
-    // Set operation code to ARP request (1), convert to network byte order
-    arp_hdr->opcode = htons(1);
-
-    // Set source MAC address to the router's interface MAC address
-    // get_interface_mac is a utility function that retrieves the MAC address
-    get_interface_mac(next_route->interface, arp_hdr->shwa);
-
-    // Get the router's IP for the interface and use it as source IP
-    // get_interface_ip returns a string, dr_get_ip_from_char converts to uint32_t
-    uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
-    arp_hdr->sprotoa = router_ip;
-
-    // Set target MAC address to all zeros (what we're trying to discover)
-    // memset fills the memory area with a specified value (0 in this case)
-    memset(arp_hdr->thwa, 0, sizeof(arp_hdr->thwa));
-
-    // Set target IP address to the next hop's IP from the routing table
-    arp_hdr->tprotoa = next_route->next_hop;
-
-    // Set destination MAC to broadcast (all FF) since we don't know target MAC
-    // memset fills the memory with 0xFF (broadcast address)
-    memset(eth_hdr->ethr_dhost, 0xff, sizeof(eth_hdr->ethr_dhost));
-
-    // Set Ethernet type to ARP protocol, convert to network byte order
-    eth_hdr->ethr_type = htons(ARP_ETHERTYPE);
-
-    // Send the complete frame (Ethernet header + ARP header) out the interface
-    // send_to_link is a utility function that transmits frames
-    send_to_link(next_route->interface, (char *)eth_hdr, sizeof(*eth_hdr) + sizeof(*arp_hdr));
-}
-
-/**
  * Creates and sends an ICMP packet (used for error reporting)
  * Types: 11 for Time Exceeded, 3 for Destination Unreachable
  */
@@ -106,10 +54,8 @@ void dr_icmp_packet(struct ether_hdr *eth_hdr,
                     uint32_t interface)
 {
     // Extract IP and ICMP headers from the received packet
-    struct ip_hdr *ip_hdr = (struct ip_hdr *)((char *)eth_hdr +
-                                              sizeof(*eth_hdr));
-    struct icmp_hdr *icmp_hdr = (struct icmp_hdr *)((char *)ip_hdr +
-                                                    sizeof(*ip_hdr));
+    struct ip_hdr *ip_hdr = (struct ip_hdr *)((char *)eth_hdr + sizeof(*eth_hdr));
+    struct icmp_hdr *icmp_hdr = (struct icmp_hdr *)((char *)ip_hdr + sizeof(*ip_hdr));
 
     // Configure the ICMP header with requested type and default code 0
     icmp_hdr->mtype = type; // 11 for Time Exceeded, 3 for Destination Unreachable
@@ -176,6 +122,173 @@ void dr_icmp_packet(struct ether_hdr *eth_hdr,
 
     // Free the allocated memory for ICMP body
     free(icmp_body);
+}
+
+/**
+ * Creates and sends an ARP packet (request or reply)
+ * @param eth_hdr Ethernet header to use
+ * @param opcode ARP operation code (1=request, 2=reply)
+ * @param interface Interface to send on
+ * @param target_ip Target IP address
+ * @param target_mac Target MAC address (NULL for requests)
+ * @param next_route Route entry (only needed for requests)
+ */
+void dr_send_arp(struct ether_hdr *eth_hdr,
+                 uint16_t opcode,
+                 uint32_t interface,
+                 uint32_t target_ip,
+                 uint8_t *target_mac,
+                 struct route_table_entry *next_route)
+{
+    // Create a new buffer for the ARP packet to avoid overwriting original packet
+    char buffer[sizeof(struct ether_hdr) + sizeof(struct arp_hdr)];
+    struct ether_hdr *new_eth_hdr = (struct ether_hdr *)buffer;
+    struct arp_hdr *arp_hdr = (struct arp_hdr *)(buffer + sizeof(struct ether_hdr));
+
+    // Determine the correct outgoing interface
+    uint32_t out_interface = interface;
+    if (opcode == 1 && next_route)
+    { // For ARP requests, use next_route interface
+        out_interface = next_route->interface;
+    }
+
+    // Configure the ARP header fields
+    arp_hdr->hw_type = htons(1);               // Hardware type: Ethernet
+    arp_hdr->proto_type = htons(IP_ETHERTYPE); // Protocol: IPv4
+    arp_hdr->hw_len = 6;                       // MAC size: 6 bytes
+    arp_hdr->proto_len = 4;                    // IPv4 size: 4 bytes
+    arp_hdr->opcode = htons(opcode);           // Operation: request or reply
+
+    // Get router's IP for the outgoing interface
+    uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(out_interface));
+
+    // Set source IP (router's IP)
+    arp_hdr->sprotoa = router_ip;
+
+    // Set target IP address
+    arp_hdr->tprotoa = target_ip;
+
+    // Set source MAC (router's MAC)
+    get_interface_mac(out_interface, arp_hdr->shwa);
+
+    // Set target MAC address
+    if (opcode == 1)
+    {
+        // For requests: zero out target MAC (unknown)
+        memset(arp_hdr->thwa, 0, sizeof(arp_hdr->thwa));
+    }
+    else
+    {
+        // For replies: set target MAC to requester's MAC
+        memcpy(arp_hdr->thwa, target_mac, sizeof(arp_hdr->thwa));
+    }
+
+    // Configure Ethernet header
+    if (opcode == 1)
+    {
+        // For requests: broadcast destination
+        memset(new_eth_hdr->ethr_dhost, 0xff, sizeof(new_eth_hdr->ethr_dhost));
+    }
+    else
+    {
+        // For replies: send to specific MAC
+        memcpy(new_eth_hdr->ethr_dhost, target_mac, sizeof(new_eth_hdr->ethr_dhost));
+    }
+
+    // Set source MAC in Ethernet header
+    get_interface_mac(out_interface, new_eth_hdr->ethr_shost);
+
+    // Set Ethernet type to ARP
+    new_eth_hdr->ethr_type = htons(ARP_ETHERTYPE);
+
+    // Send the packet
+    send_to_link(out_interface, buffer, sizeof(struct ether_hdr) + sizeof(struct arp_hdr));
+}
+
+/**
+ * Processes ARP packets - handles both ARP requests and replies
+ */
+void dr_arp_packet(struct ether_hdr *eth_hdr,
+                   uint32_t interface,
+                   uint32_t len,
+                   struct router_t *router)
+{
+    // Extract ARP header from the Ethernet frame
+    struct arp_hdr *arp_hdr = (struct arp_hdr *)((char *)eth_hdr + sizeof(*eth_hdr));
+
+    // Handle ARP request (opcode 1)
+    if (ntohs(arp_hdr->opcode) == 1)
+    {
+        // Get router's interface IP address
+        uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
+
+        // Check if ARP request is for router's IP
+        if (arp_hdr->tprotoa != router_ip)
+            return; // Not for us, ignore
+
+        // Send ARP reply
+        dr_send_arp(eth_hdr, 2, interface, arp_hdr->sprotoa, arp_hdr->shwa, NULL);
+    }
+    // Handle ARP reply (opcode 2)
+    else if (ntohs(arp_hdr->opcode) == 2)
+    {
+        // Always update the ARP table with received IP-MAC mapping
+        int found = 0;
+
+        // Check if IP already exists in ARP table
+        for (int i = 0; i < router->arp_table_len; i++)
+        {
+            if (router->arp_table[i].ip == arp_hdr->sprotoa)
+            {
+                // Update existing entry with new MAC
+                memcpy(router->arp_table[i].mac, arp_hdr->shwa, sizeof(arp_hdr->shwa));
+                found = 1;
+                break;
+            }
+        }
+
+        // If IP not found, add new entry to ARP table
+        if (!found && router->arp_table_len < MAX_ARP_TABLE_LEN)
+        {
+            router->arp_table[router->arp_table_len].ip = arp_hdr->sprotoa;
+            memcpy(router->arp_table[router->arp_table_len].mac, arp_hdr->shwa, sizeof(arp_hdr->shwa));
+            ++(router->arp_table_len);
+        }
+
+        // Create a new queue for packets still waiting for ARP resolution
+        queue new_queue = create_queue();
+
+        // Process waiting queue
+        while (!queue_empty(router->waiting_queue))
+        {
+            struct waiting_queue_entry *entry = (struct waiting_queue_entry *)queue_deq(router->waiting_queue);
+
+            // Check if this packet was waiting for the MAC we just learned
+            if (entry->next_route->next_hop == arp_hdr->sprotoa)
+            {
+                // Update destination MAC address in the queued packet
+                struct ether_hdr *entry_eth_hdr = (struct ether_hdr *)entry->eth_hdr;
+                memcpy(entry_eth_hdr->ethr_dhost, arp_hdr->shwa, sizeof(arp_hdr->shwa));
+
+                // Set source MAC to router's outgoing interface MAC
+                get_interface_mac(entry->next_route->interface, entry_eth_hdr->ethr_shost);
+
+                // Forward the packet now that we know the MAC
+                send_to_link(entry->next_route->interface, (char *)entry_eth_hdr, entry->len);
+
+                // Free memory for this packet
+                free(entry->eth_hdr);
+                free(entry);
+            }
+            else
+            {
+                // Packet still waiting for another ARP resolution
+                queue_enq(new_queue, entry);
+            }
+        }
+        queue_free(router->waiting_queue);
+        router->waiting_queue = new_queue;
+    }
 }
 
 /**
@@ -263,7 +376,7 @@ void dr_ip_packet(struct ether_hdr *eth_hdr,
             queue_enq(router->waiting_queue, entry); // Enqueue the waiting entry
 
             // Send ARP request to discover the MAC address
-            dr_send_arp_request(eth_hdr, next_route, interface);
+            dr_send_arp(eth_hdr, 1, interface, next_route->next_hop, NULL, next_route);
             return;
         }
 
@@ -325,110 +438,6 @@ void dr_ip_packet(struct ether_hdr *eth_hdr,
         // Send the ICMP Echo Reply
         send_to_link(interface, (char *)eth_hdr, sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*icmp_hdr) + icmp_len);
         free(icmp_body); // Free temporary buffer
-    }
-}
-
-/**
- * Processes ARP packets - handles both ARP requests and replies
- */
-void dr_arp_packet(struct ether_hdr *eth_hdr,
-                   uint32_t interface,
-                   uint32_t len,
-                   struct router_t *router)
-{
-    // Extract ARP header from the Ethernet frame
-    struct arp_hdr *arp_hdr = (struct arp_hdr *)((char *)eth_hdr +
-                                                 sizeof(*eth_hdr));
-
-    // Handle ARP request (opcode 1)
-    // ntohs converts 16-bit value from network to host byte order
-    if (ntohs(arp_hdr->opcode) == 1)
-    {
-        // Get router's interface IP address
-        uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
-
-        // Check if ARP request is for router's IP
-        if (arp_hdr->tprotoa != router_ip)
-            return; // Not for us, ignore
-
-        // Prepare ARP reply (opcode 2)
-        arp_hdr->opcode = htons(2); // Convert to network byte order
-
-        // Swap target and source IP addresses
-        arp_hdr->tprotoa = arp_hdr->sprotoa; // Target IP is requester's IP
-        arp_hdr->sprotoa = router_ip;        // Source IP is router's IP
-
-        // Swap target and source MAC addresses
-        // Copy requester's MAC as target
-        memcpy(arp_hdr->thwa, arp_hdr->shwa, sizeof(arp_hdr->shwa));
-
-        // Set source MAC to router's interface MAC
-        get_interface_mac(interface, arp_hdr->shwa);
-
-        // Update Ethernet header addresses
-        memcpy(eth_hdr->ethr_dhost, arp_hdr->thwa, sizeof(arp_hdr->thwa));
-        get_interface_mac(interface, eth_hdr->ethr_shost);
-
-        // Send the ARP reply
-        send_to_link(interface, (char *)eth_hdr, len);
-    }
-    else
-    {
-        // Handle ARP reply - update ARP table with received IP-MAC mapping
-        int found = 0;
-
-        // Check if IP already exists in ARP table
-        for (int i = 0; i < router->arp_table_len; i++)
-        {
-            if (router->arp_table[i].ip == arp_hdr->sprotoa)
-            {
-                // Update existing entry with new MAC
-                memcpy(router->arp_table[i].mac, arp_hdr->shwa, sizeof(arp_hdr->shwa));
-                found = 1;
-                break;
-            }
-        }
-
-        // If IP not found, add new entry to ARP table
-        if (!found)
-        {
-            router->arp_table[router->arp_table_len].ip = arp_hdr->sprotoa;                             // Store IP
-            memcpy(router->arp_table[router->arp_table_len].mac, arp_hdr->shwa, sizeof(arp_hdr->shwa)); // Store MAC
-            ++(router->arp_table_len);                                                                  // Increment table size
-        }
-
-        // Creăm o nouă coadă pentru pachetele care încă așteaptă rezolvarea ARP
-        queue new_queue = create_queue();
-
-        // Iterate through waiting queue
-        while (!queue_empty(router->waiting_queue))
-        {
-            // Extragem primul element din coadă
-            struct waiting_queue_entry *entry = (struct waiting_queue_entry *)queue_deq(router->waiting_queue);
-
-            // Verificăm dacă acest pachet aștepta MAC-ul pe care tocmai l-am aflat
-            if (entry->next_route->next_hop == arp_hdr->sprotoa)
-            {
-                // Update destination MAC address in the queued packet
-                struct ether_hdr *entry_eth_hdr = (struct ether_hdr *)entry->eth_hdr;
-                memcpy(entry_eth_hdr->ethr_dhost, arp_hdr->shwa, sizeof(arp_hdr->shwa));
-
-                // Forward the packet now that we know the MAC
-                send_to_link(entry->next_route->interface, (char *)entry_eth_hdr, entry->len);
-
-                // Free memory for this packet
-                free(entry->eth_hdr);
-                free(entry); // Eliberăm și structura entry
-            }
-            else
-            {
-                // Pachetul încă așteaptă o altă rezolvare ARP
-                // Îl adăugăm în noua coadă
-                queue_enq(new_queue, entry);
-            }
-        }
-        queue_free(router->waiting_queue);
-        router->waiting_queue = new_queue;        
     }
 }
 
