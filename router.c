@@ -9,33 +9,10 @@
 #include <arpa/inet.h>         // For IP address manipulation (inet_pton)
 
 /**
- * Converts a string representation of an IP address to its 32-bit integer value
- * Uses inet_pton() from arpa/inet.h to perform the conversion
- */
-uint32_t dr_get_ip_from_char(char *char_ip)
-{
-    uint32_t int_ip;
-    // inet_pton() converts from presentation format (string) to network format (binary)
-    // AF_INET specifies IPv4 address family
-    inet_pton(AF_INET, char_ip, &int_ip);
-    return int_ip; // Returns the IP address as a 32-bit integer
-}
-
-/**
- * Implements Longest Prefix Match (LPM) algorithm to find the best route
- * for a given destination IP address using the trie data structure
- */
-struct route_table_entry *dr_get_next_route(uint32_t ip_dest, trie_node_t *routing_trie)
-{
-    // Use the trie-based longest prefix match implementation
-    return trie_longest_prefix_match(routing_trie, ip_dest);
-}
-
-/**
  * Searches the ARP table for a given IP address
  * Returns the corresponding ARP entry if found, NULL otherwise
  */
-struct arp_table_entry *dr_get_arp_entry(struct router_t *router, uint32_t given_ip)
+struct arp_table_entry *get_arp_entry(struct router_t *router, uint32_t given_ip)
 {
     // Linear search through the ARP table
     for (int i = 0; i < router->arp_table_len; ++i)
@@ -46,82 +23,79 @@ struct arp_table_entry *dr_get_arp_entry(struct router_t *router, uint32_t given
 }
 
 /**
- * Creates and sends an ICMP packet (used for error reporting)
- * Types: 11 for Time Exceeded, 3 for Destination Unreachable
+ * Generates ICMP responses for error notifications or echo replies
+ * @param frame Pointer to the original Ethernet frame
+ * @param msg_type ICMP message type code (e.g., 0=Echo Reply, 3=Unreachable, 11=Time Exceeded)
+ * @param iface Interface index to send the ICMP message from
  */
-void dr_icmp_packet(struct ether_hdr *eth_hdr,
-                    uint8_t type,
-                    uint32_t interface)
+void icmp_packet(struct ether_hdr *frame, uint8_t msg_type, uint32_t iface)
 {
-    // Extract IP and ICMP headers from the received packet
-    struct ip_hdr *ip_hdr = (struct ip_hdr *)((char *)eth_hdr + sizeof(*eth_hdr));
-    struct icmp_hdr *icmp_hdr = (struct icmp_hdr *)((char *)ip_hdr + sizeof(*ip_hdr));
-
-    // Configure the ICMP header with requested type and default code 0
-    icmp_hdr->mtype = type; // 11 for Time Exceeded, 3 for Destination Unreachable
-    icmp_hdr->mcode = 0;    // Subcodes are set to 0 (generic error)
-
-    // Reset checksum to 0 before calculation (required by checksum algorithm)
-    icmp_hdr->check = 0;
-
-    // Calculate ICMP header checksum, convert to network byte order (htons)
-    // checksum() computes the Internet checksum as per RFC 1071
-    icmp_hdr->check = htons(checksum((uint16_t *)icmp_hdr,
-                                     sizeof(*icmp_hdr)));
-
-    // For ICMP error messages, we include the original IP header and first 8 bytes
-    // of the original message in the ICMP body to help recipient diagnose the error
-    uint32_t icmp_len = sizeof(*ip_hdr) + 8;
-
-    // Allocate memory for ICMP body
-    // malloc allocates requested memory space and returns a pointer to it
-    int8_t *icmp_body = malloc(icmp_len);
-
-    // Check if memory allocation failed and exit if it did
-    DIE(!icmp_body, "malloc() failed.\n");
-
-    // Copy the original IP header and first 8 bytes of data to ICMP body
-    // memcpy copies n bytes from source to destination memory area
-    memcpy(icmp_body, ip_hdr, icmp_len);
-
-    // Get router's IP address for the interface
-    uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
-
-    // Reverse the packet's direction - swap source and destination IP
-    ip_hdr->dest_addr = ip_hdr->source_addr; // Send back to original source
-    ip_hdr->source_addr = router_ip;         // From router's interface
-
-    // Set TTL to maximum allowed value and convert to network byte order
-    ip_hdr->ttl = htons(MAX_TTL);
-
-    // Set protocol field to ICMP (1)
-    ip_hdr->proto = IPPROTO_ICMP;
-
-    // Update total length field to reflect ICMP message size, convert to network byte order
-    ip_hdr->tot_len = htons(sizeof(*icmp_hdr) + sizeof(*ip_hdr) + icmp_len);
-
-    // Reset IP header checksum to 0 before calculation
-    ip_hdr->checksum = 0;
-
-    // Calculate IP header checksum, convert to network byte order
-    ip_hdr->checksum = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
-
-    // Swap Ethernet source and destination addresses
-    // Send back to original source MAC address
-    memcpy(eth_hdr->ethr_dhost, eth_hdr->ethr_shost,
-           sizeof(eth_hdr->ethr_shost));
-
-    // Set source MAC to router's interface MAC
-    get_interface_mac(interface, eth_hdr->ethr_shost);
-
-    // Copy the ICMP body (original packet excerpt) after the ICMP header
-    memcpy((char *)icmp_hdr + sizeof(*icmp_hdr), icmp_body, icmp_len);
-
-    // Send the complete ICMP error message out the interface
-    send_to_link(interface, (char *)eth_hdr, sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*icmp_hdr) + icmp_len);
-
-    // Free the allocated memory for ICMP body
-    free(icmp_body);
+    // Locate headers in the received packet
+    char *cursor = (char *)frame;
+    struct ip_hdr *ip = (struct ip_hdr *)(cursor + sizeof(struct ether_hdr));
+    struct icmp_hdr *icmp = (struct icmp_hdr *)(cursor + sizeof(struct ether_hdr) + sizeof(struct ip_hdr));
+    
+    // Store original source information before modification
+    uint32_t orig_src_ip = ip->source_addr;
+    uint8_t orig_src_mac[6];
+    memcpy(orig_src_mac, frame->ethr_shost, 6);
+    
+    // Determine size of data portion to include
+    const size_t data_size = sizeof(*ip) + 8;
+    
+    // Prepare workspace for data
+    uint8_t *data_copy = malloc(data_size);
+    if (!data_copy) {
+        fprintf(stderr, "Failed to allocate memory for ICMP data\n");
+        return;
+    }
+    
+    // Preserve original packet headers
+    memcpy(data_copy, ip, data_size);
+    
+    // Set ICMP fields - type, code and reset checksum for calculation
+    icmp->mtype = msg_type;
+    icmp->mcode = 0;
+    icmp->check = 0;
+    
+    // Calculate correct checksum for the ICMP header
+    uint16_t icmp_csum = checksum((uint16_t *)icmp, sizeof(*icmp));
+    icmp->check = htons(icmp_csum);
+    
+    // Get local IP address for source of reply 
+    char *local_ip_str = get_interface_ip(iface);
+    uint32_t local_ip = inet_addr(local_ip_str);
+    
+    // Update IP header fields for the response
+    ip->ttl = MAX_TTL;                 // Set fresh TTL
+    ip->proto = IPPROTO_ICMP;          // Protocol is ICMP
+    ip->source_addr = local_ip;        // Source is now router
+    ip->dest_addr = orig_src_ip;       // Destination is original sender
+    
+    // Calculate total packet size and update IP length field
+    uint16_t total_ip_size = sizeof(*ip) + sizeof(*icmp) + data_size;
+    ip->tot_len = htons(total_ip_size);
+    
+    // Reset and recalculate IP checksum
+    ip->checksum = 0;
+    ip->checksum = htons(checksum((uint16_t *)ip, sizeof(*ip)));
+    
+    // Swap Ethernet addresses and update source MAC
+    memcpy(frame->ethr_dhost, orig_src_mac, 6);
+    get_interface_mac(iface, frame->ethr_shost);
+    
+    // Place original packet data in the ICMP payload area
+    memcpy(cursor + sizeof(struct ether_hdr) + sizeof(struct ip_hdr) + sizeof(struct icmp_hdr), 
+           data_copy, data_size);
+           
+    // Calculate total frame size for transmission
+    uint32_t total_frame_size = sizeof(struct ether_hdr) + total_ip_size;
+    
+    // Transmit the ICMP message
+    send_to_link(iface, cursor, total_frame_size);
+    
+    // Clean up
+    free(data_copy);
 }
 
 /**
@@ -133,7 +107,7 @@ void dr_icmp_packet(struct ether_hdr *eth_hdr,
  * @param target_mac Target MAC address (NULL for requests)
  * @param next_route Route entry (only needed for requests)
  */
-void dr_send_arp(struct ether_hdr *eth_hdr,
+void send_arp(struct ether_hdr *eth_hdr,
                  uint16_t opcode,
                  uint32_t interface,
                  uint32_t target_ip,
@@ -147,9 +121,14 @@ void dr_send_arp(struct ether_hdr *eth_hdr,
 
     // Determine the correct outgoing interface
     uint32_t out_interface = interface;
-    if (opcode == 1 && next_route)
-    { // For ARP requests, use next_route interface
+    if (opcode == 1)
+    {
         out_interface = next_route->interface;
+        memset(arp_hdr->thwa, 0, sizeof(arp_hdr->thwa));
+        memset(new_eth_hdr->ethr_dhost, 0xff, sizeof(new_eth_hdr->ethr_dhost));
+    } else {
+        memcpy(arp_hdr->thwa, target_mac, sizeof(arp_hdr->thwa));
+        memcpy(new_eth_hdr->ethr_dhost, target_mac, sizeof(new_eth_hdr->ethr_dhost));
     }
 
     // Configure the ARP header fields
@@ -160,7 +139,7 @@ void dr_send_arp(struct ether_hdr *eth_hdr,
     arp_hdr->opcode = htons(opcode);           // Operation: request or reply
 
     // Get router's IP for the outgoing interface
-    uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(out_interface));
+    uint32_t router_ip = inet_addr(get_interface_ip(out_interface));
 
     // Set source IP (router's IP)
     arp_hdr->sprotoa = router_ip;
@@ -170,30 +149,6 @@ void dr_send_arp(struct ether_hdr *eth_hdr,
 
     // Set source MAC (router's MAC)
     get_interface_mac(out_interface, arp_hdr->shwa);
-
-    // Set target MAC address
-    if (opcode == 1)
-    {
-        // For requests: zero out target MAC (unknown)
-        memset(arp_hdr->thwa, 0, sizeof(arp_hdr->thwa));
-    }
-    else
-    {
-        // For replies: set target MAC to requester's MAC
-        memcpy(arp_hdr->thwa, target_mac, sizeof(arp_hdr->thwa));
-    }
-
-    // Configure Ethernet header
-    if (opcode == 1)
-    {
-        // For requests: broadcast destination
-        memset(new_eth_hdr->ethr_dhost, 0xff, sizeof(new_eth_hdr->ethr_dhost));
-    }
-    else
-    {
-        // For replies: send to specific MAC
-        memcpy(new_eth_hdr->ethr_dhost, target_mac, sizeof(new_eth_hdr->ethr_dhost));
-    }
 
     // Set source MAC in Ethernet header
     get_interface_mac(out_interface, new_eth_hdr->ethr_shost);
@@ -208,7 +163,7 @@ void dr_send_arp(struct ether_hdr *eth_hdr,
 /**
  * Processes ARP packets - handles both ARP requests and replies
  */
-void dr_arp_packet(struct ether_hdr *eth_hdr,
+void arp_packet(struct ether_hdr *eth_hdr,
                    uint32_t interface,
                    uint32_t len,
                    struct router_t *router)
@@ -216,35 +171,18 @@ void dr_arp_packet(struct ether_hdr *eth_hdr,
     // Extract ARP header from the Ethernet frame
     struct arp_hdr *arp_hdr = (struct arp_hdr *)((char *)eth_hdr + sizeof(*eth_hdr));
 
-    // Handle ARP request (opcode 1)
-    if (ntohs(arp_hdr->opcode) == 1)
-    {
-        // Get router's interface IP address
-        uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
-
-        // Check if ARP request is for router's IP
-        if (arp_hdr->tprotoa != router_ip)
-            return; // Not for us, ignore
-
-        // Send ARP reply
-        dr_send_arp(eth_hdr, 2, interface, arp_hdr->sprotoa, arp_hdr->shwa, NULL);
-    }
-    // Handle ARP reply (opcode 2)
-    else if (ntohs(arp_hdr->opcode) == 2)
+    // Handle ARP reply
+    if (ntohs(arp_hdr->opcode) == 2)
     {
         // Always update the ARP table with received IP-MAC mapping
         int found = 0;
 
         // Check if IP already exists in ARP table
-        for (int i = 0; i < router->arp_table_len; i++)
-        {
-            if (router->arp_table[i].ip == arp_hdr->sprotoa)
-            {
-                // Update existing entry with new MAC
-                memcpy(router->arp_table[i].mac, arp_hdr->shwa, sizeof(arp_hdr->shwa));
-                found = 1;
-                break;
-            }
+        struct arp_table_entry *entry = get_arp_entry(router, arp_hdr->sprotoa);
+        if (entry) {
+            // Update existing entry with new MAC
+            memcpy(entry->mac, arp_hdr->shwa, sizeof(arp_hdr->shwa));
+            found = 1;
         }
 
         // If IP not found, add new entry to ARP table
@@ -288,157 +226,147 @@ void dr_arp_packet(struct ether_hdr *eth_hdr,
         }
         queue_free(router->waiting_queue);
         router->waiting_queue = new_queue;
+    } else {
+        // Get router's interface IP address
+        uint32_t router_ip = inet_addr(get_interface_ip(interface));
+
+        // Check if ARP request is for router's IP
+        if (arp_hdr->tprotoa != router_ip)
+            return; // Not for us, ignore
+
+        // Send ARP reply
+        send_arp(eth_hdr, 2, interface, arp_hdr->sprotoa, arp_hdr->shwa, NULL);
     }
 }
 
 /**
- * Processes an IP packet - handles forwarding, TTL decrement, and error conditions
+ * Router data plane logic for IP packet processing
+ * Handles forwarding, error responses, and TTL management
  */
-void dr_ip_packet(struct ether_hdr *eth_hdr,
-                  uint32_t interface,
-                  uint32_t len,
-                  struct router_t *router)
+void ip_packet(struct ether_hdr *frame, uint32_t iface, uint32_t size, struct router_t *router)
 {
-    // Extract IP header from the Ethernet frame
-    struct ip_hdr *ip_hdr = (struct ip_hdr *)((char *)eth_hdr +
-                                              sizeof(*eth_hdr));
-
-    // Get router's interface IP address
-    uint32_t router_ip = dr_get_ip_from_char(get_interface_ip(interface));
-
-    // Check if packet is not destined to the router itself
-    if (ip_hdr->dest_addr != router_ip)
-    {
-        // Validate IP header checksum
-        // Convert from network to host byte order for comparison
-        uint16_t received_checksum = ntohs(ip_hdr->checksum);
-
-        // Reset checksum field to zero before calculation
-        ip_hdr->checksum = 0;
-
-        // Calculate expected checksum (ihl*4 gives header length in bytes)
-        uint16_t calculated_checksum = checksum((uint16_t *)ip_hdr, ip_hdr->ihl * 4);
-
-        // Drop packet if checksum is invalid - silently discard corrupted packets
-        if (received_checksum != calculated_checksum)
-        {
-            return;
+    char *pkt_data = (char *)frame;
+    struct ip_hdr *ip = (struct ip_hdr *)(pkt_data + sizeof(struct ether_hdr));
+    
+    // Lookup our interface IP
+    uint32_t my_ip = inet_addr(get_interface_ip(iface));
+    
+    // Check if packet is destined for this router
+    int for_me = (ip->dest_addr == my_ip);
+    
+    if (for_me) {
+        // This packet is meant for us - handle as Echo Request if ICMP
+        if (ip->proto == IPPROTO_ICMP) {
+            struct icmp_hdr *icmp = (struct icmp_hdr *)(pkt_data + sizeof(struct ether_hdr) + sizeof(struct ip_hdr));
+            
+            // Only respond to Echo Requests (type 8)
+            if (icmp->mtype != 8) return;
+            
+            // Calculate ICMP payload size
+            uint16_t ip_len = ntohs(ip->tot_len);
+            uint16_t icmp_data_len = ip_len - sizeof(*ip) - sizeof(*icmp);
+            
+            // Save ICMP payload before modifying packet
+            uint8_t *echo_data = malloc(icmp_data_len);
+            if (!echo_data) return;
+            memcpy(echo_data, (uint8_t*)icmp + sizeof(*icmp), icmp_data_len);
+            
+            // Convert request to reply
+            icmp->mtype = 0;                    // Echo Reply
+            icmp->mcode = 0;
+            icmp->check = 0;
+            
+            // Swap addresses for the reply
+            ip->dest_addr = ip->source_addr;    // Send to original source
+            ip->source_addr = my_ip;            // From router's interface
+            ip->ttl = MAX_TTL;                  // Fresh TTL
+            
+            // Reset IP checksum for recalculation
+            ip->checksum = 0;
+            ip->checksum = htons(checksum((uint16_t *)ip, sizeof(*ip)));
+            
+            // Swap Ethernet addresses
+            uint8_t tmp_mac[6];
+            memcpy(tmp_mac, frame->ethr_dhost, 6);
+            memcpy(frame->ethr_dhost, frame->ethr_shost, 6);
+            get_interface_mac(iface, frame->ethr_shost);
+            
+            // Restore the ICMP data
+            memcpy((uint8_t*)icmp + sizeof(*icmp), echo_data, icmp_data_len);
+            free(echo_data);
+            
+            // Calculate ICMP checksum over header and data
+            icmp->check = htons(checksum((uint16_t *)icmp, sizeof(*icmp) + icmp_data_len));
+            
+            // Send the reply
+            send_to_link(iface, pkt_data, size);
         }
-
-        // Check if TTL is expired or will expire after decrement
-        if (ip_hdr->ttl <= 1)
-        {
-            // Send ICMP Time Exceeded message (type 11)
-            dr_icmp_packet(eth_hdr, 11, interface);
-            return;
-        }
-
-        // Decrement TTL as packet passes through router
-        --ip_hdr->ttl;
-
-        // Recalculate IP checksum after TTL modification
-        ip_hdr->checksum = 0; // Reset checksum field
-        ip_hdr->checksum = htons(checksum((uint16_t *)ip_hdr, ip_hdr->ihl * 4));
-
-        // Find next hop using Longest Prefix Match algorithm
-        struct route_table_entry *next_route = dr_get_next_route(ip_hdr->dest_addr, router->routing_table);
-
-        // If no route found, send ICMP Destination Unreachable (type 3)
-        if (!next_route)
-        {
-            dr_icmp_packet(eth_hdr, 3, interface);
-            return;
-        }
-
-        // Look up next hop's MAC address in ARP table
-        struct arp_table_entry *next_arp = dr_get_arp_entry(router, next_route->next_hop);
-
-        // Set source MAC to router's outgoing interface MAC
-        get_interface_mac(next_route->interface, eth_hdr->ethr_shost);
-
-        // If MAC address not found for next hop IP
-        if (!next_arp)
-        {
-            // Queue the packet while we resolve the MAC address
-            struct waiting_queue_entry *entry = malloc(sizeof(*entry));
-            DIE(!entry, "malloc() failed.\n");
-
-            // Allocate memory and copy the entire frame
-            entry->eth_hdr = malloc(len);
-            DIE(!entry->eth_hdr, "malloc() failed.\n");
-            memcpy(entry->eth_hdr, eth_hdr, len);
-
-            // Store frame length and route information
-            entry->len = len;
-            entry->next_route = next_route;
-
-            // Add to waiting queue (at the end)
-            queue_enq(router->waiting_queue, entry); // Enqueue the waiting entry
-
-            // Send ARP request to discover the MAC address
-            dr_send_arp(eth_hdr, 1, interface, next_route->next_hop, NULL, next_route);
-            return;
-        }
-
-        // Set destination MAC to next hop's MAC address
-        memcpy(eth_hdr->ethr_dhost, next_arp->mac, sizeof(next_arp->mac));
-
-        // Forward the packet to next hop through appropriate interface
-        send_to_link(next_route->interface, (char *)eth_hdr, len);
+        return;
     }
-    else
-    {
-        // Packet is destined to router itself - handle as ICMP Echo request
-        struct icmp_hdr *icmp_hdr = (struct icmp_hdr *)((char *)ip_hdr +
-                                                        sizeof(*ip_hdr));
-
-        // Create ICMP Echo reply (type 0) from Echo request (type 8)
-        icmp_hdr->mtype = 0; // Echo Reply
-        icmp_hdr->mcode = 0; // Code 0
-        icmp_hdr->check = 0; // Reset checksum field
-
-        // Calculate length of ICMP data - total IP length minus headers
-        // ntohs converts from network to host byte order
-        uint32_t icmp_len = ntohs(ip_hdr->tot_len) -
-                            sizeof(*ip_hdr) -
-                            sizeof(*icmp_hdr);
-
-        // Copy ICMP data to temporary buffer
-        int8_t *icmp_body = malloc(icmp_len);
-        DIE(!icmp_body, "malloc() failed.\n");
-        memcpy(icmp_body, (char *)icmp_hdr + sizeof(*icmp_hdr), icmp_len);
-
-        // Swap IP addresses for the reply
-        ip_hdr->dest_addr = ip_hdr->source_addr; // Send back to original source
-        ip_hdr->source_addr = router_ip;         // From router's interface
-
-        // Set TTL, protocol, and length
-        ip_hdr->ttl = htons(MAX_TTL);
-        ip_hdr->proto = IPPROTO_ICMP;
-        ip_hdr->tot_len = htons((uint16_t)icmp_len +
-                                sizeof(*icmp_hdr) +
-                                sizeof(*ip_hdr));
-        // Recalculate IP header checksum
-        ip_hdr->checksum = 0;
-        ip_hdr->checksum = htons(checksum((uint16_t *)ip_hdr, sizeof(*ip_hdr)));
-
-        // Swap Ethernet addresses
-        memcpy(eth_hdr->ethr_dhost, eth_hdr->ethr_shost,
-               sizeof(eth_hdr->ethr_shost));
-        get_interface_mac(interface, eth_hdr->ethr_shost);
-
-        // Copy ICMP data back to packet
-        memcpy((char *)icmp_hdr + sizeof(*icmp_hdr), icmp_body, icmp_len);
-
-        // Calculate ICMP checksum for echo reply (header + data)
-        icmp_hdr->check = 0;
-        icmp_hdr->check = htons(checksum((uint16_t *)icmp_hdr,
-                                         sizeof(*icmp_hdr) + icmp_len));
-
-        // Send the ICMP Echo Reply
-        send_to_link(interface, (char *)eth_hdr, sizeof(*eth_hdr) + sizeof(*ip_hdr) + sizeof(*icmp_hdr) + icmp_len);
-        free(icmp_body); // Free temporary buffer
+    
+    // Packet needs to be forwarded - validate checksum first
+    uint16_t orig_csum = ntohs(ip->checksum);
+    ip->checksum = 0;
+    uint16_t calc_csum = checksum((uint16_t *)ip, ip->ihl * 4);
+    
+    // Drop corrupted packets
+    if (orig_csum != calc_csum) return;
+    
+    // Check TTL - if 1 or less after decrement, send Time Exceeded
+    if (ip->ttl <= 1) {
+        icmp_packet(frame, 11, iface);  // Time Exceeded
+        return;
     }
+    
+    // Decrement TTL and update checksum
+    ip->ttl--;
+    ip->checksum = 0;
+    ip->checksum = htons(checksum((uint16_t *)ip, ip->ihl * 4));
+    
+    // Find next hop via longest prefix match
+    struct route_table_entry *route = trie_longest_prefix_match(router->routing_table, ip->dest_addr);
+    
+    // No route found - send Destination Unreachable
+    if (!route) {
+        icmp_packet(frame, 3, iface);
+        return;
+    }
+    
+    // Update source MAC address for outgoing interface
+    get_interface_mac(route->interface, frame->ethr_shost);
+    
+    // Look up destination MAC via ARP table
+    struct arp_table_entry *next_hop = get_arp_entry(router, route->next_hop);
+    
+    // If MAC not in ARP table, queue packet and send ARP request
+    if (!next_hop) {
+        // Allocate queue entry
+        struct waiting_queue_entry *pending = malloc(sizeof(*pending));
+        if (!pending) return;
+        
+        // Save packet while waiting for ARP response
+        pending->eth_hdr = malloc(size);
+        if (!pending->eth_hdr) {
+            free(pending);
+            return;
+        }
+        
+        // Copy packet and metadata
+        memcpy(pending->eth_hdr, frame, size);
+        pending->len = size;
+        pending->next_route = route;
+        
+        // Add to waiting queue
+        queue_enq(router->waiting_queue, pending);
+        
+        // Send ARP request to discover next hop's MAC
+        send_arp(frame, 1, iface, route->next_hop, NULL, route);
+        return;
+    }
+    
+    // Update destination MAC and forward packet
+    memcpy(frame->ethr_dhost, next_hop->mac, 6);
+    send_to_link(route->interface, pkt_data, size);
 }
 
 int main(int argc, char *argv[])
@@ -483,12 +411,12 @@ int main(int argc, char *argv[])
         // ntohs converts from network to host byte order
         switch (ntohs(eth_hdr->ethr_type))
         {
-        case IP_ETHERTYPE: // IPv4 packet (0x0800)
-            dr_ip_packet(eth_hdr, interface, len, router);
-            break;
-        case ARP_ETHERTYPE: // ARP packet (0x0806)
-            dr_arp_packet(eth_hdr, interface, len, router);
-            break;
+            case IP_ETHERTYPE: // IPv4 packet (0x0800)
+                ip_packet(eth_hdr, interface, len, router);
+                break;
+            case ARP_ETHERTYPE: // ARP packet (0x0806)
+                arp_packet(eth_hdr, interface, len, router);
+                break;
         }
         // Other EtherTypes are ignored
     }
