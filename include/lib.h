@@ -75,25 +75,27 @@ struct router_t{
     queue waiting_queue;  // Queue for packets waiting for ARP resolution
 };
 
-/**
- * Sends a packet to a specific network interface
- * 
- * @param interface - The interface index to send the packet to
- * @param frame_data - Pointer to the frame data to be sent
- * @param length - The length of the frame in bytes
- * @return 0 on success, -1 on failure
- */
-int send_to_link(int interface, char *frame_data, size_t length);
-
-/**
- * Receives a packet from any available network interface
- * This is a blocking function - waits until a packet is received
+/*
+ * @brief Sends a packet on a specific interface.
  *
- * @param frame_data - Buffer where the received packet will be stored
- * @param length - Pointer where the length of the received packet will be stored
- * @return The interface index from which the packet was received
+ * @param length - will be set to the total number of bytes received.
+ * @param frame_data - region of memory in which the data will be copied; should
+ *        have at least MAX_PACKET_LEN bytes allocated
+ * @param interface - index of the output interface
+ * Returns: the interface it has been received from.
  */
-int recv_from_any_link(char *frame_data, size_t *length);
+int send_to_link(size_t length, char *frame_data, size_t interface);
+
+/*
+ * @brief Receives a packet. Blocking function, blocks if there is no packet to
+ * be received.
+ *
+ * @param frame_data - region of memory in which the data will be copied; should
+ *        have at least MAX_PACKET_LEN bytes allocated 
+ * @param length - will be set to the total number of bytes received.
+ * Returns: the interface it has been received from.
+ */
+size_t recv_from_any_link(char *frame_data, size_t *length);
 
 /**
  * Gets the IP address of a specific interface
@@ -104,29 +106,31 @@ int recv_from_any_link(char *frame_data, size_t *length);
 char *get_interface_ip(int interface);
 
 /**
- * Gets the MAC address of a specific interface
+ * @brief Get the interface mac object. The function writes
+ * the MAC at the pointer mac. uint8_t *mac should be allocated.
  *
- * @param interface - The interface index
- * @param mac - Buffer where the MAC address will be stored (must be pre-allocated)
+ * @param interface
+ * @param mac
  */
 void get_interface_mac(size_t interface, uint8_t *mac);
 
 /**
- * Calculates IPv4/ICMP checksum per RFC 791/792
- * For proper calculation, the checksum field must be set to 0 beforehand
+ * @brief IPv4 checksum per  RFC 791. To compute the checksum
+ * of an IP header we must set the checksum to 0 beforehand.
  *
- * @param data - Pointer to data to calculate checksum for
- * @param len - Length of data in bytes
- * @return The calculated checksum value
+ * also works as ICMP checksum per RFC 792. To compute the checksum
+ * of an ICMP header we must set the checksum to 0 beforehand.
+
+ * @param data memory area to checksum
+ * @param length in bytes
  */
 uint16_t checksum(uint16_t *data, size_t length);
 
 /**
- * Converts a MAC address from string format to binary
- * 
- * @param txt - MAC address string (format "aa:bb:cc:dd:ee:ff")
- * @param addr - Buffer where the binary MAC will be stored
- * @return 0 on success, -1 on failure
+ * hwaddr_aton - Convert ASCII string to MAC address (colon-delimited format)
+ * @txt: MAC address as a string (e.g., "00:11:22:33:44:55")
+ * @addr: Buffer for the MAC address (ETH_ALEN = 6 bytes)
+ * Returns: 0 on success, -1 on failure (e.g., string not a MAC address)
  */
 int hwaddr_aton(const char *txt, uint8_t *addr);
 
@@ -139,13 +143,10 @@ int hwaddr_aton(const char *txt, uint8_t *addr);
  */
 int read_rtable_to_trie(const char *path, trie_node_t *trie_root);
 
-/**
- * Parses ARP table entries from a file
- *
- * @param path - Path to the ARP table file
- * @param arp_table - Pre-allocated buffer for storing ARP table entries
- * @return Number of entries read from the file
- */
+/* Parses a static mac table from path and populates arp_table.
+ * arp_table should be allocated and have enough space. This
+ * function returns the size of the arp table.
+ * */
 int parse_arp_table(char *path, struct arp_table_entry *arp_table);
 
 /**
